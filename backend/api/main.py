@@ -1,3 +1,4 @@
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -20,6 +21,12 @@ from backend.config.db import init_db_pool, close_db_pool
 from backend.core.cache_store import result_cache
 from backend.exporter.excel_exporter import export_confluent_xlsx, export_table_xlsx, export_all_csv, export_table_csv
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s : %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 # ── Constants ────────────────────────────────────────────
 MAX_FILE_SIZE_MB = 10
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
@@ -35,16 +42,37 @@ limiter = Limiter(key_func=get_remote_address)
 # ── Lifecycle ─────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Starting up...")
+    logger.info("🚀 [1/2] Initialization: Starting FastAPI application...")
+    
     try:
+        # ระบุว่ากำลังทำอะไร
+        logger.info("📡 Connecting to PostgreSQL database pool...")
         init_db_pool()
-        # Bug 3 Fix: ย้ายการโหลด mapping ออกจาก startup
-        logger.info("✅ Database pool initialized. Mapping will be loaded per request.")
+        
+        # อธิบายเหตุผล (Rationale) ของการเปลี่ยนแปลง (Bug Fix)
+        logger.info(
+            "✅ Database pool initialized. "
+            "Note: Mapping loading deferred to request-time to optimize startup speed (Bug #3 fix)."
+        )
+        
     except Exception as e:
-        logger.error(f"❌ Startup failed: {e}", exc_info=True)
+        # ใส่ Error Category หรือจุดที่เกิดปัญหาให้ชัด
+        logger.error(f"❌ Critical Failure: Application failed to boot during Database Setup. Error: {e}", exc_info=True)
         raise
+        
+    logger.info("🚀 [2/2] Startup Complete: Server is ready to accept connections.")
+    
     yield
-    logger.info("🛑 Shutdown")
+    
+    # ส่วนของ Shutdown
+    logger.info("🛑 Termination: Gracefully shutting down application...")
+    try:
+        close_db_pool()
+        logger.info("🔌 Database connections closed successfully.")
+    except Exception as e:
+        logger.error(f"⚠️ Shutdown Warning: Error while closing resources: {e}")
+    
+    logger.info("👋 Shutdown sequence finished.")
     close_db_pool()
 
 app = FastAPI(lifespan=lifespan)
@@ -52,8 +80,6 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── CORS ─────────────────────────────────────────────────
-# [FIX] เพิ่ม localhost:8000 และ 127.0.0.1:8000 เพื่อแก้ CORS blocked
-# ถ้าต้องการ lock down ใน production ให้ set env ALLOWED_ORIGINS แทน
 _ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://127.0.0.1:8000"
@@ -62,7 +88,7 @@ _ORIGINS = os.getenv(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ORIGINS,
-    allow_credentials=True,          # ← เพิ่มบรรทัดนี้
+    allow_credentials=True,          
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
 )
@@ -334,6 +360,9 @@ def export_one(session_id: str, table_name: str):
         raise HTTPException(404, f"Table '{table_name}' not found")
     
     anomalies = data.get("byte_anomalies", {}).get(table_name)
+    # Normalize: ensure anomalies is a list of dicts (guard against list of strings)
+    if anomalies:
+        anomalies = [a for a in anomalies if isinstance(a, dict)]
     buf = export_table_xlsx(
         columns,
         table_name,

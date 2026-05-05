@@ -358,7 +358,7 @@ def _build_sheet(ws, table_name: str, columns: list, anomalies: list | None = No
     _write_avro_section(ws, table_name, columns, start_row=1, start_col=_AVRO_START)
 
     if anomalies:
-        tagged = [{**a, "table": table_name} for a in anomalies]
+        tagged = [{**a, "table": table_name} for a in anomalies if isinstance(a, dict)]
         _write_warning_section(ws, tagged, start_row=end_row, c2=_AVRO_END)
 
     _set_col_widths(ws, col_offsets=[1])
@@ -388,7 +388,8 @@ def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None):
         current_row = max(raw_end, avro_end) + 2   # 2-row gap ระหว่างตาราง
 
         for a in (byte_anomalies or {}).get(table_name) or []:
-            all_anomalies.append({**a, "table": table_name})
+            if isinstance(a, dict):
+                all_anomalies.append({**a, "table": table_name})
 
     if all_anomalies:
         _write_warning_section(ws, all_anomalies,
@@ -531,7 +532,8 @@ def export_all_csv(tables: dict, byte_anomalies: dict | None = None) -> io.Bytes
         all_rows.extend(_build_csv_rows(table_name, columns))
         first = False
         for a in (byte_anomalies or {}).get(table_name) or []:
-            all_anomalies.append({**a, "table": table_name})
+            if isinstance(a, dict):
+                all_anomalies.append({**a, "table": table_name})
 
     all_rows.extend(_build_csv_warning_rows(all_anomalies))
     return _csv_bytes(all_rows)
@@ -541,6 +543,6 @@ def export_table_csv(columns: list, table_name: str = "Sheet1",
                      anomalies: list | None = None) -> io.BytesIO:
     rows = _build_csv_rows(table_name, columns)
     if anomalies:
-        tagged = [{**a, "table": table_name} for a in anomalies]
+        tagged = [{**a, "table": table_name} for a in anomalies if isinstance(a, dict)]
         rows.extend(_build_csv_warning_rows(tagged))
     return _csv_bytes(rows)
