@@ -29,13 +29,12 @@ class MappingRepository:
         JOIN db_type dst_dt     ON dst_dt.id   = dm.db_id
     """
 
-    def get_all(self) -> dict:
-        """ดึง mapping ทั้งหมด (default fallback — ใช้ standard_type เป็น final)"""
+    def get_all(self, source_db: str = None) -> dict:
+        """ดึง mapping ทั้งหมด (ใช้ standard_type เป็น final) — แนะนำให้ระบุ source_db เพื่อป้องกันข้อมูลปนกัน"""
         conn = get_connection()
         try:
             with conn.cursor() as cur:
-                # fallback: ดึงแค่ source→standard โดยไม่ filter dest
-                cur.execute("""
+                query = """
                     SELECT
                         drm.source_type AS sql_type,
                         drm.raw_type,
@@ -45,8 +44,14 @@ class MappingRepository:
                     FROM datatype_raw_mapping drm
                     JOIN db_type dt ON dt.id = drm.db_id
                     LEFT JOIN datatype_standard ds ON ds.id = drm.standard_id
-                    ORDER BY drm.db_id, drm.id
-                """)
+                """
+                params = []
+                if source_db:
+                    query += " WHERE LOWER(dt.db_name) = LOWER(%s)"
+                    params.append(source_db)
+                
+                query += " ORDER BY drm.db_id, drm.id"
+                cur.execute(query, tuple(params))
                 rows = cur.fetchall()
             return self._rows_to_dict(rows)
         finally:
@@ -54,28 +59,7 @@ class MappingRepository:
 
     def get_by_source_db(self, source_db: str) -> dict:
         """ดึง mapping เฉพาะ source DB — ใช้ standard_type เป็น final (ไม่มี dest)"""
-        conn = get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT
-                        drm.source_type AS sql_type,
-                        drm.raw_type,
-                        drm.logical_type,
-                        ds.standard_type AS final_type,
-                        drm.db_id
-                    FROM datatype_raw_mapping drm
-                    JOIN db_type dt ON dt.id = drm.db_id
-                    LEFT JOIN datatype_standard ds ON ds.id = drm.standard_id
-                    WHERE LOWER(dt.db_name) = LOWER(%s)
-                    ORDER BY drm.id
-                """, (source_db,))
-                rows = cur.fetchall()
-            if rows:
-                return self._rows_to_dict(rows)
-            return self.get_all()
-        finally:
-            release_connection(conn)
+        return self.get_all(source_db=source_db)
 
     def get_by_db_pair(self, source_db: str, dest_db: str) -> dict:
         """
@@ -85,6 +69,9 @@ class MappingRepository:
         conn = get_connection()
         try:
             with conn.cursor() as cur:
+                # แก้ไข Bug 2: เปลี่ยนจาก LEFT JOIN db_type dst_dt เป็น JOIN ปกติ 
+                # และย้ายเงื่อนไข filter ไปไว้ที่ WHERE เพื่อความชัดเจน
+                # พร้อมทั้งตรวจสอบว่า dm.db_id ตรงกับ dst_dt.id จริงๆ
                 cur.execute("""
                     SELECT
                         drm.source_type     AS sql_type,
@@ -97,20 +84,20 @@ class MappingRepository:
                         dm.has_scale
                     FROM datatype_raw_mapping drm
                     JOIN db_type src_dt ON src_dt.id = drm.db_id
-                    LEFT JOIN datatype_standard ds  ON ds.id = drm.standard_id
-                    JOIN db_type dst_dt ON LOWER(dst_dt.db_name) = LOWER(%s)
-                    LEFT JOIN datatype_mapping dm   ON dm.standard_id = drm.standard_id
-                                                AND dm.db_id = dst_dt.id
+                    LEFT JOIN datatype_standard ds ON ds.id = drm.standard_id
+                    LEFT JOIN datatype_mapping dm  ON dm.standard_id = drm.standard_id
+                    JOIN db_type dst_dt ON dst_dt.id = dm.db_id
                     WHERE LOWER(src_dt.db_name) = LOWER(%s)
+                      AND LOWER(dst_dt.db_name) = LOWER(%s)
                     ORDER BY drm.id
-                """, (dest_db, source_db))
+                """, (source_db, dest_db))
                 rows = cur.fetchall()
 
             if rows:
                 return self._rows_to_dict_pair(rows)
 
-            # fallback ถ้าไม่มี mapping pair
-            return self.get_by_source_db(source_db)
+            # fallback ถ้าไม่มี mapping pair ให้ใช้ mapping ของ source_db นั้นๆ
+            return self.get_all(source_db=source_db)
         finally:
             release_connection(conn)
 
@@ -190,4 +177,4 @@ class MappingRepository:
                     "has_precision": has_precision,
                     "has_scale": has_scale,
                 }
-        return mapping
+        return mapping 

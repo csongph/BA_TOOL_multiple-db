@@ -146,43 +146,35 @@ def parse_sql(sql_text: str) -> list[dict]:
     return tables
 
 
-def validate_fk(tables: list[dict]) -> list[dict]:
-    """ตรวจสอบ FK reference ว่าชี้ไปตาราง/คอลัมน์ที่มีอยู่จริง และเป็น PK"""
-    errors: list[dict] = []
-    schema: dict[str, set] = {}
-    pk_idx: dict[str, set] = {}
+def validate_fk(tables: dict) -> list:
+    errors = []
+    for table_name, columns in tables.items():
+        for col in columns:
+            fk = col.get("fk")
+            if not fk:
+                continue
 
-    for row in tables:
-        t = row["table"]
-        schema.setdefault(t, set()).add(row["column"])
-        if row.get("is_pk"):
-            pk_idx.setdefault(t, set()).add(row["column"])
+            # ─── แก้ตรงนี้: handle ทั้ง str และ dict ───
+            if isinstance(fk, str):
+                # fk อาจเป็น "ref_table.ref_col" หรือแค่ "ref_table"
+                parts = fk.split(".")
+                ref_table = parts[0].strip()
+                ref_col   = parts[1].strip() if len(parts) > 1 else None
+            elif isinstance(fk, dict):
+                ref_table = fk.get("ref_table")
+                ref_col   = fk.get("ref_column")
+            else:
+                continue  # format ไม่รู้จัก ข้ามไป
 
-    for row in tables:
-        fk = row.get("fk")
-        if not fk:
-            continue
-
-        ref_t = fk["ref_table"]
-        ref_c = fk["ref_column"]
-        src = f"{row['table']}.{row['column']}"
-
-        if ref_t not in schema:
-            errors.append({"level": "error", "src": src,
-                           "msg": f"ตาราง '{ref_t}' ไม่มีใน schema"})
-            continue
-
-        if ref_c and ref_c not in schema[ref_t]:
-            errors.append({"level": "error", "src": src,
-                           "msg": f"column '{ref_t}.{ref_c}' ไม่มีใน schema"})
-            continue
-
-        if ref_c and ref_c not in pk_idx.get(ref_t, set()):
-            errors.append({"level": "warn", "src": src,
-                           "msg": f"'{ref_t}.{ref_c}' ไม่ใช่ PRIMARY KEY"})
-
+            if ref_table and ref_table not in tables:
+                errors.append({
+                    "table":     table_name,
+                    "column":    col["column_name"],
+                    "ref_table": ref_table,
+                    "ref_col":   ref_col,
+                    "error":     f"Referenced table '{ref_table}' not found",
+                })
     return errors
-
 
 def _strip_collate(tokens: list[str]) -> str:
     result: list[str] = []

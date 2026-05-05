@@ -27,10 +27,16 @@ class DataTypeConverter:
         t = sql_type.lower().strip()
         return re.split(r"[\(\s]", t)[0]
 
-    def apply_precision(self, sql_type: str, base: str, final_type: str) -> str:
+    def apply_precision(self, sql_type: str, base: str, final_type: str,
+                        has_length: bool = False,
+                        has_precision: bool = False,
+                        has_scale: bool = False) -> str:
         """
         ต่อ (n) หรือ (p,s) กลับเข้า final_type จาก sql_type ต้นทาง
-        base  = normalized base type เช่น 'varchar', 'money'
+        base          = normalized base type เช่น 'varchar', 'money'
+        has_length    = DB บอกว่า dest type ต้องการ length argument
+        has_precision = DB บอกว่า dest type ต้องการ precision argument
+        has_scale     = DB บอกว่า dest type ต้องการ scale argument
         """
         if base in ("money", "smallmoney", "timestamp", "rowversion"):
             return final_type
@@ -40,17 +46,23 @@ class DataTypeConverter:
 
         match = re.search(r"\(([^)]+)\)", sql_type)
 
-        needs_precision = {
+        # hardcoded fallback สำหรับ source types ที่รู้จัก
+        _NEEDS_PRECISION = {
             "decimal", "numeric",
             "varchar", "char",
             "nvarchar", "nchar",
             "binary", "varbinary",
         }
 
-        if base in needs_precision and match:
+        # ใช้ flag จาก DB ก่อน (ครอบคลุม dest type ที่ไม่อยู่ใน hardcoded set)
+        # fallback ไป hardcoded set ถ้าไม่มี flag
+        needs_p = has_length or has_precision or base in _NEEDS_PRECISION
+
+        if needs_p and match:
             return f"{final_type}({match.group(1)})"
 
-        if base in ("decimal", "numeric") and not match:
+        # decimal/numeric ที่ไม่มี precision ใน source → ใส่ default (18,0)
+        if (has_precision or base in ("decimal", "numeric")) and not match:
             return f"{final_type}(18,0)"
 
         return final_type
@@ -73,7 +85,12 @@ class DataTypeConverter:
             }
 
         final_base = data.get("dest_final") or data.get("final")
-        final = self.apply_precision(sql_type, base, final_base)
+        final = self.apply_precision(
+            sql_type, base, final_base,
+            has_length=bool(data.get("has_length")),
+            has_precision=bool(data.get("has_precision")),
+            has_scale=bool(data.get("has_scale")),
+        )
 
         standard_type = data.get("final")
 

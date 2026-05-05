@@ -26,51 +26,46 @@ MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_FILES = 20
 SESSION_TTL = timedelta(hours=1)
 
-mapping_data: dict = {}
-converter: DataTypeConverter | None = None
+# Bug 3 Fix: ไม่ต้องใช้ global mapping_data และ converter ที่โหลดตอน startup อีกต่อไป
+# แต่ยังคงเก็บ converter ไว้เป็น singleton instance สำหรับฟังก์ชันพื้นฐาน (ถ้าจำเป็น)
+converter: DataTypeConverter = DataTypeConverter({})
 
 limiter = Limiter(key_func=get_remote_address)
-
 
 # ── Lifecycle ─────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Starting up...")
-    global mapping_data, converter
-
     try:
         init_db_pool()
-        repo = MappingRepository()
-        mapping_data = repo.get_all()
-        logger.info(f"✅ Mapping loaded ({len(mapping_data)} types): {list(mapping_data.keys())}")
-        converter = DataTypeConverter(mapping_data)
+        # Bug 3 Fix: ย้ายการโหลด mapping ออกจาก startup
+        logger.info("✅ Database pool initialized. Mapping will be loaded per request.")
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}", exc_info=True)
         raise
-
     yield
-
     logger.info("🛑 Shutdown")
     close_db_pool()
-
 
 app = FastAPI(lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ── CORS: lock down in production ────────────────────────
+# ── CORS ─────────────────────────────────────────────────
+# [FIX] เพิ่ม localhost:8000 และ 127.0.0.1:8000 เพื่อแก้ CORS blocked
+# ถ้าต้องการ lock down ใน production ให้ set env ALLOWED_ORIGINS แทน
 _ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "http://localhost:5500,http://127.0.0.1:5500"
+    "http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://127.0.0.1:8000"
 ).split(",")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ORIGINS,
+    allow_credentials=True,          # ← เพิ่มบรรทัดนี้
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
 )
-
 
 # ── Models ────────────────────────────────────────────────
 class OverrideRequest(BaseModel):
@@ -88,7 +83,6 @@ class OverrideRequest(BaseModel):
             raise ValueError("Field too long")
         return v
 
-
 # ── Helpers ───────────────────────────────────────────────
 def cleanup_expired_sessions() -> None:
     now = datetime.now()
@@ -99,51 +93,47 @@ def cleanup_expired_sessions() -> None:
     if expired:
         logger.info(f"🧹 Cleaned {len(expired)} expired session(s)")
 
-
 def get_cached_data(session_id: str) -> dict:
-    try:
-        uuid.UUID(session_id)
-    except ValueError:
-        raise HTTPException(400, "Invalid session ID format")
-
-    session = result_cache.get(session_id)
-    if not session:
-        raise HTTPException(404, "Session not found or expired")
-
-    if datetime.now() - session["created_at"] > SESSION_TTL:
-        del result_cache[session_id]
-        raise HTTPException(404, "Session expired")
-
-    return session["data"]
-
+    cleanup_expired_sessions()
+    data = result_cache.get(session_id)
+    if not data:
+        raise HTTPException(404, "Session expired or not found")
+    return data
 
 def _load_mapping(source_db: str | None, dest_db: str | None) -> dict:
     """
     โหลด mapping ตาม db pair
-    - ถ้าระบุทั้งคู่ → ดึง per-pair mapping จาก DB
-    - ถ้าไม่ระบุ → ใช้ default mapping ที่โหลดตอน startup
+    - Bug 3 Fix: โหลดจาก DB เสมอตาม source_db ที่ระบุ เพื่อป้องกันข้อมูลปนกัน
     """
+    repo = MappingRepository()
+    
+    # 1. ถ้ามีทั้งคู่ -> ดึง per-pair mapping
     if source_db and dest_db:
         try:
-            repo = MappingRepository()
             pair_mapping = repo.get_by_db_pair(source_db, dest_db)
-            logger.info(
-                f"📦 Mapping loaded for {source_db} → {dest_db} "
-                f"({len(pair_mapping)} types)"
-            )
-            return pair_mapping
+            if pair_mapping:
+                logger.info(f"📦 Pair mapping loaded: {source_db} → {dest_db} ({len(pair_mapping)} types)")
+                return pair_mapping
         except Exception as e:
-            logger.warning(f"⚠️ Failed to load pair mapping ({source_db}→{dest_db}): {e} — using default")
+            logger.warning(f"⚠️ Failed to load pair mapping ({source_db}→{dest_db}): {e}")
 
-    return mapping_data
+    # 2. ถ้ามีแค่ source_db หรือโหลด pair ไม่สำเร็จ -> ดึง mapping ของ source_db นั้นๆ
+    if source_db:
+        try:
+            source_mapping = repo.get_all(source_db=source_db)
+            logger.info(f"📦 Source mapping loaded for {source_db} ({len(source_mapping)} types)")
+            return source_mapping
+        except Exception as e:
+            logger.error(f"❌ Failed to load source mapping for {source_db}: {e}")
 
+    # 3. Fallback สุดท้าย (ไม่แนะนำ) -> ดึงทั้งหมดแบบระบุไม่ได้ (อาจปนกัน)
+    logger.warning("⚠️ No source_db specified, loading all mappings (potential mix-up)")
+    return repo.get_all()
 
 # ── API ───────────────────────────────────────────────────
-
 @app.get("/health")
 def health():
     return {"status": "ok", "sessions": len(result_cache)}
-
 
 @app.get("/db-pairs")
 def get_db_pairs():
@@ -159,7 +149,6 @@ def get_db_pairs():
         logger.error(f"❌ Failed to fetch db pairs: {e}")
         raise HTTPException(500, "Failed to fetch DB pairs")
 
-
 @app.post("/convert")
 @limiter.limit("30/minute")
 async def convert(
@@ -168,15 +157,12 @@ async def convert(
     source_db: str | None = Form(default=None),
     dest_db: str | None = Form(default=None),
 ):
-    if converter is None:
-        raise HTTPException(500, "Converter not initialized")
-
     if len(files) > MAX_FILES:
         raise HTTPException(400, f"Too many files (max {MAX_FILES})")
 
-    # โหลด mapping ตาม db pair (หรือ default ถ้าไม่ระบุ)
+    # Bug 3 Fix: โหลด mapping สดๆ ใน request นี้เลย
     active_mapping = _load_mapping(source_db, dest_db)
-
+    
     logger.info(
         f"📥 Convert {len(files)} file(s) "
         f"[{source_db or 'default'} → {dest_db or 'default'}]"
@@ -184,24 +170,16 @@ async def convert(
 
     tables: dict = {}
     unknown: dict = {}
-    byte_anomalies: dict = {}
     table_source: dict = {}
     duplicate_tables: dict = {}
+    byte_anomalies: dict = {}
 
     for file in files:
-        filename = (file.filename or "").strip()
-        if not filename.lower().endswith(".sql"):
-            raise HTTPException(400, f"Only .sql files accepted, got: {filename!r}")
-
-        logger.info(f"  → Processing: {filename}")
-
+        filename = file.filename
         try:
-            await file.seek(0)
             raw = await file.read()
-
             if len(raw) > MAX_FILE_SIZE:
                 raise HTTPException(400, f"{filename}: exceeds {MAX_FILE_SIZE_MB} MB limit")
-
             sql_text = raw.decode("utf-8-sig")
         except HTTPException:
             raise
@@ -238,9 +216,9 @@ async def convert(
                 table_key = table
 
             for row in table_rows:
-                # ส่ง active_mapping ไปให้ converter ใช้แทน default
+                # ใช้ active_mapping ที่โหลดมาสดๆ ในการ convert
                 res = converter.convert(row["type"], override_mapping=active_mapping)
-
+                
                 col_entry = {
                     "column_name":     row["column"],
                     "file":            filename,
@@ -258,57 +236,32 @@ async def convert(
 
                 if res.get("status") != "ok":
                     unknown.setdefault(table_key, []).append({
-                        "column_name": row["column"],
-                        "file":        filename,
-                        "reason":      res.get("reason"),
+                        "column": row["column"],
+                        "type":   row["type"],
+                        "file":   filename,
                     })
+                
+                # ตรวจสอบ byte anomalies (เช่น binary types)
+                if res.get("raw") == "bytes" or "blob" in str(row["type"]).lower():
+                    byte_anomalies.setdefault(table_key, []).append(row["column"])
 
-                if res.get("byte_anomaly"):
-                    byte_anomalies.setdefault(table_key, []).append({
-                        "column_name": row["column"],
-                        "file":        filename,
-                        "source_type": row["type"],
-                        "raw_type":    res.get("raw"),
-                        "detail":      res.get("byte_anomaly_detail"),
-                    })
-
-    if not tables:
-        raise HTTPException(400, "No table found in any uploaded file")
-
-    all_parsed = [
-        {"table": t, "column": c["column_name"],
-         "is_pk": c.get("is_pk", False), "fk": c.get("fk")}
-        for t, cols in tables.items()
-        for c in cols
-    ]
-    fk_errors = validate_fk(all_parsed)
-
-    cleanup_expired_sessions()
+    # Validate foreign keys
+    fk_errors = validate_fk(tables)
 
     session_id = str(uuid.uuid4())
     result_cache[session_id] = {
-        "data": {
-            "tables":           tables,
-            "unknown":          unknown,
-            "fk_errors":        fk_errors,
-            "byte_anomalies":   byte_anomalies,
-            "duplicate_tables": duplicate_tables,
-            "source_db":        source_db,
-            "dest_db":          dest_db,
-        },
-        "created_at": datetime.now(),
+        "tables":           tables,
+        "unknown":          unknown,
+        "fk_errors":        fk_errors,
+        "byte_anomalies":   byte_anomalies,
+        "duplicate_tables": duplicate_tables,
+        "source_db":        source_db,
+        "dest_db":          dest_db,
+        "created_at":       datetime.now(),
     }
 
     logger.info(f"✅ Session {session_id} created — {len(tables)} table(s)")
-
-    anomaly_count = sum(len(v) for v in byte_anomalies.values())
-    if anomaly_count:
-        logger.warning(f"⚠️  Byte anomalies detected: {anomaly_count} column(s)")
-
-    dup_count = len(duplicate_tables)
-    if dup_count:
-        logger.warning(f"🚫 Duplicate tables skipped: {dup_count} table(s) — {list(duplicate_tables.keys())}")
-
+    
     return {
         "session_id":       session_id,
         "file_count":       len(files),
@@ -321,28 +274,24 @@ async def convert(
         "duplicate_tables": duplicate_tables,
     }
 
-
 @app.get("/result/{session_id}")
 def get_result(session_id: str):
     return get_cached_data(session_id)
 
-
 @app.post("/override/{session_id}")
 def override(session_id: str, body: OverrideRequest):
     data = get_cached_data(session_id)
-
     table_cols = data["tables"].get(body.table)
     if table_cols is None:
         raise HTTPException(404, f"Table '{body.table}' not found")
-
+    
     for col in table_cols:
         if col["column_name"] == body.column:
             col["final_type"] = body.new_type
             logger.info(f"✏️  Override {body.table}.{body.column} → {body.new_type}")
             return {"updated_column": col}
-
+            
     raise HTTPException(404, f"Column '{body.column}' not found in table '{body.table}'")
-
 
 @app.delete("/session/{session_id}")
 def delete_session(session_id: str):
@@ -350,22 +299,21 @@ def delete_session(session_id: str):
         uuid.UUID(session_id)
     except ValueError:
         raise HTTPException(400, "Invalid session ID format")
-
+        
     if session_id in result_cache:
         del result_cache[session_id]
         logger.info(f"🗑  Session {session_id} deleted")
         return {"status": "deleted"}
     raise HTTPException(404, "Session not found")
 
-
 # ── Export endpoints ──────────────────────────────────────
-
 @app.get("/export/{session_id}/xlsx")
 def export_all(session_id: str, tables: List[str] = Query(default=None)):
     data = get_cached_data(session_id)
     all_tables = data["tables"]
     selected = {k: v for k, v in all_tables.items() if tables is None or k in tables}
     byte_anomalies = {k: v for k, v in data.get("byte_anomalies", {}).items() if k in selected}
+    
     buf = export_confluent_xlsx(
         selected,
         byte_anomalies=byte_anomalies,
@@ -378,13 +326,13 @@ def export_all(session_id: str, tables: List[str] = Query(default=None)):
         headers={"Content-Disposition": "attachment; filename=confluent_mapping.xlsx"},
     )
 
-
 @app.get("/export/{session_id}/xlsx/{table_name}")
 def export_one(session_id: str, table_name: str):
     data = get_cached_data(session_id)
     columns = data["tables"].get(table_name)
     if columns is None:
         raise HTTPException(404, f"Table '{table_name}' not found")
+    
     anomalies = data.get("byte_anomalies", {}).get(table_name)
     buf = export_table_xlsx(
         columns,
@@ -400,13 +348,13 @@ def export_one(session_id: str, table_name: str):
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
-
 @app.get("/export/{session_id}/csv")
 def export_all_csv_endpoint(session_id: str, tables: List[str] = Query(default=None)):
     data = get_cached_data(session_id)
     all_tables = data["tables"]
     selected = {k: v for k, v in all_tables.items() if tables is None or k in tables}
     byte_anomalies = {k: v for k, v in data.get("byte_anomalies", {}).items() if k in selected}
+    
     buf = export_all_csv(selected, byte_anomalies=byte_anomalies)
     return StreamingResponse(
         buf,
@@ -414,13 +362,13 @@ def export_all_csv_endpoint(session_id: str, tables: List[str] = Query(default=N
         headers={"Content-Disposition": "attachment; filename=confluent_mapping.csv"},
     )
 
-
 @app.get("/export/{session_id}/csv/{table_name}")
 def export_one_csv(session_id: str, table_name: str):
     data = get_cached_data(session_id)
     columns = data["tables"].get(table_name)
     if columns is None:
         raise HTTPException(404, f"Table '{table_name}' not found")
+    
     anomalies = data.get("byte_anomalies", {}).get(table_name)
     buf = export_table_csv(columns, table_name, anomalies=anomalies)
     filename = f"{table_name}.csv"
