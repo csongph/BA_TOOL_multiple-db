@@ -104,16 +104,41 @@ ALLOWED_ORIGINS=http://localhost:5500,http://127.0.0.1:5500
 
 ### Database Schema
 
-ระบบต้องการตาราง `sql_type_mapping` ใน PostgreSQL:
+ระบบต้องการฐานข้อมูล PostgreSQL ที่มีตาราง mapping ดังนี้:
 
 ```sql
-CREATE TABLE sql_type_mapping (
-    sql_type     VARCHAR NOT NULL,  -- SQL type ต้นทาง เช่น 'varchar'
-    raw_type     VARCHAR,           -- Raw type เช่น 'string'
-    logical_type VARCHAR,           -- Logical type เช่น 'uuid'
-    target_type  VARCHAR            -- Final type เช่น 'STRING'
+CREATE TABLE db_type (
+    id SERIAL PRIMARY KEY,
+    db_name VARCHAR NOT NULL UNIQUE
+);
+
+CREATE TABLE datatype_standard (
+    id SERIAL PRIMARY KEY,
+    standard_type VARCHAR NOT NULL
+);
+
+CREATE TABLE datatype_raw_mapping (
+    id SERIAL PRIMARY KEY,
+    db_id INT NOT NULL REFERENCES db_type(id),
+    source_type VARCHAR NOT NULL,
+    raw_type VARCHAR,
+    logical_type VARCHAR,
+    standard_id INT REFERENCES datatype_standard(id)
+);
+
+CREATE TABLE datatype_mapping (
+    id SERIAL PRIMARY KEY,
+    db_id INT NOT NULL REFERENCES db_type(id),
+    standard_id INT NOT NULL REFERENCES datatype_standard(id),
+    final_type VARCHAR,
+    has_length BOOLEAN DEFAULT FALSE,
+    has_precision BOOLEAN DEFAULT FALSE,
+    has_scale BOOLEAN DEFAULT FALSE
 );
 ```
+
+โดยโค้ดจะใช้ `datatype_raw_mapping` เพื่อแปลง source SQL type เป็น raw/logical type และ
+ใช้ `datatype_mapping` เพื่อเลือก final SQL type ของ dest DB เมื่อระบุ `source_db` และ `dest_db`.
 
 ### Ports
 

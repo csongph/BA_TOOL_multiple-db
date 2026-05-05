@@ -72,7 +72,10 @@ class DataTypeConverter:
                 "status": "unknown", "reason": f"Type '{base}' not found in mapping"
             }
 
-        final = self.apply_precision(sql_type, base, data["final"])
+        final_base = data.get("dest_final") or data.get("final")
+        final = self.apply_precision(sql_type, base, final_base)
+
+        standard_type = data.get("final")
 
         # ── ตรวจ byte anomaly ────────────────────────────────────
         # [FIX] เช็ค logical_type แทน source base type
@@ -88,6 +91,7 @@ class DataTypeConverter:
             "input": sql_type,
             "raw": data["raw"],
             "logical": data["logical"],
+            "standard_type": standard_type,
             "final": final,
             "status": "ok",
             "reason": None,

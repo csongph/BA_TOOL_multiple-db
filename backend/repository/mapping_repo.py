@@ -67,7 +67,7 @@ class MappingRepository:
                     FROM datatype_raw_mapping drm
                     JOIN db_type dt ON dt.id = drm.db_id
                     LEFT JOIN datatype_standard ds ON ds.id = drm.standard_id
-                    WHERE dt.db_name = %s
+                    WHERE LOWER(dt.db_name) = LOWER(%s)
                     ORDER BY drm.id
                 """, (source_db,))
                 rows = cur.fetchall()
@@ -98,12 +98,12 @@ class MappingRepository:
                     FROM datatype_raw_mapping drm
                     JOIN db_type src_dt ON src_dt.id = drm.db_id
                     LEFT JOIN datatype_standard ds  ON ds.id = drm.standard_id
+                    JOIN db_type dst_dt ON LOWER(dst_dt.db_name) = LOWER(%s)
                     LEFT JOIN datatype_mapping dm   ON dm.standard_id = drm.standard_id
-                    JOIN db_type dst_dt ON dst_dt.id = dm.db_id
-                    WHERE src_dt.db_name = %s
-                      AND dst_dt.db_name = %s
+                                                AND dm.db_id = dst_dt.id
+                    WHERE LOWER(src_dt.db_name) = LOWER(%s)
                     ORDER BY drm.id
-                """, (source_db, dest_db))
+                """, (dest_db, source_db))
                 rows = cur.fetchall()
 
             if rows:

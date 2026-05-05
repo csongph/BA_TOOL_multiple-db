@@ -266,6 +266,92 @@ def _set_col_widths(ws, col_offsets: list | None = None):
         ws.column_dimensions[get_column_letter(base + 20)].width = gap_w
 
 
+def _set_comparison_widths(ws):
+    widths = [18, 22, 20, 16, 16, 18, 18, 12, 8, 20, 20, 16]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+def _set_summary_widths(ws):
+    widths = [20, 50]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+def _build_type_comparison_sheet(ws, tables: dict,
+                                 source_db: str | None = None,
+                                 dest_db: str | None = None):
+    row = 1
+    _merge(ws, row, 1, 12)
+    _s(ws, row, 1, "Type Comparison", bg=_C["topic_bg"], bold=True, align_h="left")
+    row += 2
+
+    if source_db or dest_db:
+        _s(ws, row, 1, "Source DB", bold=True, align_h="left")
+        _s(ws, row, 2, source_db or "")
+        row += 1
+        _s(ws, row, 1, "Destination DB", bold=True, align_h="left")
+        _s(ws, row, 2, dest_db or "")
+        row += 2
+
+    headers = [
+        "Table", "Column", "Source SQL Type", "Raw Type",
+        "Logical Type", "Standard Type", "Final Type",
+        "Nullable", "PK", "File", "Source DB", "Dest DB"
+    ]
+    for ci, h in enumerate(headers, 1):
+        _s(ws, row, ci, h, bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
+    row += 1
+
+    for table_name, columns in tables.items():
+        for col in columns:
+            _s(ws, row, 1, table_name, align_h="left")
+            _s(ws, row, 2, col.get("column_name", ""), align_h="left")
+            _s(ws, row, 3, col.get("source_sql_type", ""))
+            _s(ws, row, 4, col.get("raw_type", ""))
+            _s(ws, row, 5, col.get("logical_type", ""))
+            _s(ws, row, 6, col.get("standard_type", ""))
+            _s(ws, row, 7, col.get("final_type", ""))
+            _s(ws, row, 8, col.get("nullable", ""))
+            _s(ws, row, 9, "Y" if col.get("is_pk") else "N")
+            _s(ws, row, 10, col.get("file", ""), align_h="left")
+            _s(ws, row, 11, source_db or "")
+            _s(ws, row, 12, dest_db or "")
+            row += 1
+
+    _set_comparison_widths(ws)
+
+
+def _build_summary_sheet(ws, tables: dict,
+                         source_db: str | None = None,
+                         dest_db: str | None = None,
+                         byte_anomalies: dict | None = None):
+    row = 1
+    _merge(ws, row, 1, 2)
+    _s(ws, row, 1, "Export Summary", bg=_C["topic_bg"], bold=True, align_h="left")
+    row += 2
+
+    total_columns = sum(len(cols) for cols in tables.values())
+    duplicate_tables = [name for name in tables if "__" in name]
+    anomaly_count = sum(len(v) for v in (byte_anomalies or {}).values())
+
+    summary_rows = [
+        ("Source DB", source_db or ""),
+        ("Destination DB", dest_db or ""),
+        ("Exported Tables", len(tables)),
+        ("Exported Columns", total_columns),
+        ("Duplicate table keys", ", ".join(duplicate_tables) if duplicate_tables else "None"),
+        ("Byte Anomalies", anomaly_count),
+    ]
+
+    for key, value in summary_rows:
+        _s(ws, row, 1, key, bold=True, align_h="left")
+        _s(ws, row, 2, value, align_h="left")
+        row += 1
+
+    _set_summary_widths(ws)
+
+
 def _build_sheet(ws, table_name: str, columns: list, anomalies: list | None = None):
     """Single-table sheet: Raw (cols 1-8) และ AVRO (cols 11-18) เขียนพร้อมกันที่ row 1"""
     end_row = _write_raw_section(ws, table_name, columns, start_row=1, start_col=1)
@@ -313,12 +399,26 @@ def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None):
 
 # ── Public API ────────────────────────────────────────────────────
 
-def export_confluent_xlsx(tables: dict, byte_anomalies: dict | None = None) -> io.BytesIO:
-    """ทุกตารางใน sheet เดียว เรียงแนวนอน WARNING รวมด้านล่าง"""
+def export_confluent_xlsx(tables: dict,
+                           byte_anomalies: dict | None = None,
+                           source_db: str | None = None,
+                           dest_db: str | None = None) -> io.BytesIO:
+    """ทุกตารางใน workbook เดียว: Data Dictionary + Type Comparison + Summary"""
     wb = Workbook()
+
     ws = wb.active
     ws.title = "Data Dictionary"
     _build_multi_sheet(ws, tables, byte_anomalies)
+
+    comparison_ws = wb.create_sheet(title="Type Comparison")
+    _build_type_comparison_sheet(comparison_ws, tables,
+                                 source_db=source_db, dest_db=dest_db)
+
+    summary_ws = wb.create_sheet(title="Summary")
+    _build_summary_sheet(summary_ws, tables,
+                         source_db=source_db, dest_db=dest_db,
+                         byte_anomalies=byte_anomalies)
+
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
@@ -326,11 +426,23 @@ def export_confluent_xlsx(tables: dict, byte_anomalies: dict | None = None) -> i
 
 
 def export_table_xlsx(columns: list, table_name: str = "Sheet1",
-                      anomalies: list | None = None) -> io.BytesIO:
+                      anomalies: list | None = None,
+                      source_db: str | None = None,
+                      dest_db: str | None = None) -> io.BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = table_name[:31]
     _build_sheet(ws, table_name, columns, anomalies=anomalies)
+
+    comparison_ws = wb.create_sheet(title="Type Comparison")
+    _build_type_comparison_sheet(comparison_ws, {table_name: columns},
+                                 source_db=source_db, dest_db=dest_db)
+
+    summary_ws = wb.create_sheet(title="Summary")
+    _build_summary_sheet(summary_ws, {table_name: columns},
+                         source_db=source_db, dest_db=dest_db,
+                         byte_anomalies={table_name: anomalies} if anomalies else {})
+
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)

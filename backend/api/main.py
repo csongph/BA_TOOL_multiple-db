@@ -246,6 +246,7 @@ async def convert(
                     "file":            filename,
                     "raw_type":        res.get("raw"),
                     "logical_type":    res.get("logical"),
+                    "standard_type":   res.get("standard_type"),
                     "final_type":      res.get("final") if res.get("status") == "ok" else row["type"],
                     "source_sql_type": row["type"],
                     "nullable":        "NOT NULL" if row.get("nullable") == "NOT NULL" else "NULL",
@@ -365,7 +366,12 @@ def export_all(session_id: str, tables: List[str] = Query(default=None)):
     all_tables = data["tables"]
     selected = {k: v for k, v in all_tables.items() if tables is None or k in tables}
     byte_anomalies = {k: v for k, v in data.get("byte_anomalies", {}).items() if k in selected}
-    buf = export_confluent_xlsx(selected, byte_anomalies=byte_anomalies)
+    buf = export_confluent_xlsx(
+        selected,
+        byte_anomalies=byte_anomalies,
+        source_db=data.get("source_db"),
+        dest_db=data.get("dest_db"),
+    )
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -380,7 +386,13 @@ def export_one(session_id: str, table_name: str):
     if columns is None:
         raise HTTPException(404, f"Table '{table_name}' not found")
     anomalies = data.get("byte_anomalies", {}).get(table_name)
-    buf = export_table_xlsx(columns, table_name, anomalies=anomalies)
+    buf = export_table_xlsx(
+        columns,
+        table_name,
+        anomalies=anomalies,
+        source_db=data.get("source_db"),
+        dest_db=data.get("dest_db"),
+    )
     filename = f"{table_name}.xlsx"
     return StreamingResponse(
         buf,
