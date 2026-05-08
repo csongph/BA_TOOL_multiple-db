@@ -15,8 +15,8 @@ LINE_SKIP_KEYWORDS = {"primary", "foreign", "constraint", "unique", "check", "in
 
 # [FIX-Bug] regex compile ครั้งเดียว ไม่ compile ในลูป
 _TABLE_PATTERN = re.compile(
-    r"create\s+table\s+(?:if\s+not\s+exists\s+)?([a-zA-Z0-9_.\"'\[\]]+)\s*\((.*?)\)\s*;",
-    re.IGNORECASE | re.DOTALL
+    r"create\s+table\s+(?:if\s+not\s+exists\s+)?([a-zA-Z0-9_.\"'\[\]]+)\s*\(",
+    re.IGNORECASE
 )
 _PAREN_CONTENT = re.compile(r"\(([^)]+)\)")
 _PK_INLINE = re.compile(r"\bPRIMARY\s+KEY\b")
@@ -38,9 +38,9 @@ def _clean_name(s: str) -> str:
 
 def parse_sql(sql_text: str) -> list[dict]:
     tables = []
-    matches = _TABLE_PATTERN.findall(sql_text)
+    sql_text = _strip_sql_comments(sql_text)
 
-    for table_name, body in matches:
+    for table_name, body in _iter_create_table_blocks(sql_text):
         clean_table_name = _clean_name(table_name.split(".")[-1])
         lines = _split_columns(body)
 
@@ -146,7 +146,32 @@ def parse_sql(sql_text: str) -> list[dict]:
     return tables
 
 
-def validate_fk(tables: dict) -> list:
+def _iter_create_table_blocks(sql_text: str):
+    for match in _TABLE_PATTERN.finditer(sql_text):
+        table_name = match.group(1)
+        open_idx = match.end() - 1
+        depth = 0
+
+        for idx in range(open_idx, len(sql_text)):
+            ch = sql_text[idx]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    yield table_name, sql_text[open_idx + 1:idx]
+                    break
+
+
+def validate_fk(tables: dict[str, list[dict]]) -> list:
+    """
+    ตรวจสอบ FK references
+    tables: dict[table_name, list[col_dict]]
+    col_dict รองรับ 2 รูปแบบ:
+      - parse_sql output: key "column"
+      - session tables (main.py): key "column_name"
+    ทั้งสองกรณีใช้ col.get("column_name") or col.get("column")
+    """
     errors = []
     for table_name, columns in tables.items():
         for col in columns:
@@ -154,9 +179,8 @@ def validate_fk(tables: dict) -> list:
             if not fk:
                 continue
 
-            # ─── แก้ตรงนี้: handle ทั้ง str และ dict ───
+            # ─── handle ทั้ง str และ dict ───
             if isinstance(fk, str):
-                # fk อาจเป็น "ref_table.ref_col" หรือแค่ "ref_table"
                 parts = fk.split(".")
                 ref_table = parts[0].strip()
                 ref_col   = parts[1].strip() if len(parts) > 1 else None
@@ -164,16 +188,33 @@ def validate_fk(tables: dict) -> list:
                 ref_table = fk.get("ref_table")
                 ref_col   = fk.get("ref_column")
             else:
-                continue  # format ไม่รู้จัก ข้ามไป
+                continue
+
+            col_name = col.get("column_name") or col.get("column")
 
             if ref_table and ref_table not in tables:
                 errors.append({
                     "table":     table_name,
-                    "column":    col["column_name"],
+                    "column":    col_name,
                     "ref_table": ref_table,
                     "ref_col":   ref_col,
                     "error":     f"Referenced table '{ref_table}' not found",
                 })
+                continue
+
+            if ref_table and ref_col:
+                ref_columns = {
+                    ref.get("column_name") or ref.get("column")
+                    for ref in tables.get(ref_table, [])
+                }
+                if ref_col not in ref_columns:
+                    errors.append({
+                        "table":     table_name,
+                        "column":    col_name,
+                        "ref_table": ref_table,
+                        "ref_col":   ref_col,
+                        "error":     f"Referenced column '{ref_table}.{ref_col}' not found",
+                    })
     return errors
 
 def _strip_collate(tokens: list[str]) -> str:
@@ -191,18 +232,47 @@ def _strip_collate(tokens: list[str]) -> str:
     return " ".join(result)
 
 
+def _strip_sql_comments(sql_text: str) -> str:
+    lines: list[str] = []
+    for line in sql_text.splitlines():
+        in_single = False
+        in_double = False
+        cut_idx = len(line)
+
+        for idx, ch in enumerate(line):
+            prev = line[idx - 1] if idx > 0 else ""
+            if ch == "'" and not in_double and prev != "\\":
+                in_single = not in_single
+            elif ch == '"' and not in_single and prev != "\\":
+                in_double = not in_double
+            elif ch == "-" and not in_single and not in_double and line[idx:idx + 2] == "--":
+                cut_idx = idx
+                break
+
+        lines.append(line[:cut_idx])
+    return "\n".join(lines)
+
+
 def _split_columns(body: str) -> list[str]:
     """แยก column definitions ด้วย comma โดยไม่สนใจ comma ใน parenthesis"""
     parts: list[str] = []
     depth: int       = 0
     buf:   list[str] = []
+    in_single: bool  = False
+    in_double: bool  = False
 
-    for ch in body:
-        if ch == "(":
+    for idx, ch in enumerate(body):
+        prev = body[idx - 1] if idx > 0 else ""
+        if ch == "'" and not in_double and prev != "\\":
+            in_single = not in_single
+        elif ch == '"' and not in_single and prev != "\\":
+            in_double = not in_double
+
+        if not in_single and not in_double and ch == "(":
             depth += 1
-        elif ch == ")":
+        elif not in_single and not in_double and ch == ")":
             depth -= 1
-        if ch == "," and depth == 0:
+        if ch == "," and depth == 0 and not in_single and not in_double:
             parts.append("".join(buf).strip())
             buf = []
         else:
@@ -243,5 +313,6 @@ if __name__ == "__main__":
     if not errors:
         print("  OK — no issues")
     for e in errors:
-        icon = "ERR" if e["level"] == "error" else "WARN"
-        print(f"  [{icon}] {e['src']} -- {e['msg']}")
+        # [BUG FIX] error dict ไม่มี key "level"/"src"/"msg"
+        # validate_fk() ใช้ keys: table, column, ref_table, ref_col, error
+        print(f"  [ERR] {e['table']}.{e['column']} -> {e['ref_table']}.{e.get('ref_col') or '?'} - {e['error']}")

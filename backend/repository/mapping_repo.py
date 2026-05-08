@@ -2,6 +2,13 @@ from backend.config.db import get_connection, release_connection
 
 
 class MappingRepository:
+    def __init__(self, db_name: str = "default"):
+        """
+        db_name: ชื่อ pool ที่ต้องการใช้ (ต้องตรงกับที่ init_db_pool() สร้างไว้)
+        default = "default" ซึ่งตรงกับ DB_URL env var
+        """
+        self.db_name = db_name
+
     # Query หลัก: JOIN 3 ทาง
     #   datatype_raw_mapping  (source type → Avro raw/logical)
     #   datatype_standard     (standard type กลาง)
@@ -31,12 +38,14 @@ class MappingRepository:
 
     def get_all(self, source_db: str = None) -> dict:
         """ดึง mapping ทั้งหมด (ใช้ standard_type เป็น final) — แนะนำให้ระบุ source_db เพื่อป้องกันข้อมูลปนกัน"""
-        conn = get_connection()
+        conn = get_connection(self.db_name)
         try:
             with conn.cursor() as cur:
+                # [BUG FIX] query เดิมขาด raw_type และ logical_type
+                # ทำให้ _rows_to_dict ได้รับ None ทั้งสองฟิลด์ → converter แมพไม่ได้
                 query = """
                     SELECT
-                        drm.source_type AS sql_type,
+                        drm.source_type  AS sql_type,
                         drm.raw_type,
                         drm.logical_type,
                         ds.standard_type AS final_type,
@@ -49,13 +58,13 @@ class MappingRepository:
                 if source_db:
                     query += " WHERE LOWER(dt.db_name) = LOWER(%s)"
                     params.append(source_db)
-                
+
                 query += " ORDER BY drm.db_id, drm.id"
                 cur.execute(query, tuple(params))
                 rows = cur.fetchall()
             return self._rows_to_dict(rows)
         finally:
-            release_connection(conn)
+            release_connection(conn, self.db_name)
 
     def get_by_source_db(self, source_db: str) -> dict:
         """ดึง mapping เฉพาะ source DB — ใช้ standard_type เป็น final (ไม่มี dest)"""
@@ -66,29 +75,31 @@ class MappingRepository:
         ดึง mapping สำหรับ source→dest DB pair
         final_type = dest SQL type จาก datatype_mapping (ต่างกันตาม dest DB)
         """
-        conn = get_connection()
+        conn = get_connection(self.db_name)
         try:
             with conn.cursor() as cur:
-                # แก้ไข Bug 2: เปลี่ยนจาก LEFT JOIN db_type dst_dt เป็น JOIN ปกติ 
-                # และย้ายเงื่อนไข filter ไปไว้ที่ WHERE เพื่อความชัดเจน
-                # พร้อมทั้งตรวจสอบว่า dm.db_id ตรงกับ dst_dt.id จริงๆ
                 cur.execute("""
                     SELECT
                         drm.source_type     AS sql_type,
                         drm.raw_type,
                         drm.logical_type,
                         ds.standard_type,
-                        dm.final_type       AS dest_type,
-                        dm.has_length,
-                        dm.has_precision,
-                        dm.has_scale
+                        COALESCE(dm.final_type, ds.standard_type) AS dest_type,
+                        COALESCE(dm.has_length,    false) AS has_length,
+                        COALESCE(dm.has_precision, false) AS has_precision,
+                        COALESCE(dm.has_scale,     false) AS has_scale
                     FROM datatype_raw_mapping drm
-                    JOIN db_type src_dt ON src_dt.id = drm.db_id
-                    LEFT JOIN datatype_standard ds ON ds.id = drm.standard_id
-                    LEFT JOIN datatype_mapping dm  ON dm.standard_id = drm.standard_id
-                    JOIN db_type dst_dt ON dst_dt.id = dm.db_id
-                    WHERE LOWER(src_dt.db_name) = LOWER(%s)
-                      AND LOWER(dst_dt.db_name) = LOWER(%s)
+                    JOIN db_type src_dt
+                        ON src_dt.id = drm.db_id
+                       AND LOWER(src_dt.db_name) = LOWER(%s)
+                    LEFT JOIN datatype_standard ds
+                        ON ds.id = drm.standard_id
+                    LEFT JOIN datatype_mapping dm
+                        ON dm.standard_id = drm.standard_id
+                       AND dm.db_id = (
+                               SELECT id FROM db_type
+                               WHERE LOWER(db_name) = LOWER(%s)
+                           )
                     ORDER BY drm.id
                 """, (source_db, dest_db))
                 rows = cur.fetchall()
@@ -99,28 +110,44 @@ class MappingRepository:
             # fallback ถ้าไม่มี mapping pair ให้ใช้ mapping ของ source_db นั้นๆ
             return self.get_all(source_db=source_db)
         finally:
-            release_connection(conn)
+            release_connection(conn, self.db_name)
 
     def get_available_db_pairs(self) -> list[dict]:
-        conn = get_connection()
+        conn = get_connection(self.db_name)
         try:
             with conn.cursor() as cur:
+                # source = DB ที่มีใน datatype_raw_mapping (มี type ให้แปลง)
                 cur.execute("""
                     SELECT DISTINCT dt.db_name
                     FROM datatype_raw_mapping drm
                     JOIN db_type dt ON dt.id = drm.db_id
                     ORDER BY dt.db_name
                 """)
-                rows = cur.fetchall()
-            dbs = [r[0] for r in rows]
+                source_rows = cur.fetchall()
+
+                # dest = DB ทุกตัวที่รู้จัก (ทั้ง source และ dest side)
+                cur.execute("""
+                    SELECT DISTINCT db_name FROM db_type
+                    WHERE id IN (
+                        SELECT DISTINCT db_id FROM datatype_raw_mapping
+                        UNION
+                        SELECT DISTINCT db_id FROM datatype_mapping
+                    )
+                    ORDER BY db_name
+                """)
+                all_rows = cur.fetchall()
+
+            sources = [r[0] for r in source_rows]
+            all_dbs = [r[0] for r in all_rows]
+
             return [
                 {"source_db": src, "dest_db": dst}
-                for src in dbs
-                for dst in dbs
+                for src in sources
+                for dst in all_dbs
                 if src != dst
             ]
         finally:
-            release_connection(conn)
+            release_connection(conn, self.db_name)
 
     @staticmethod
     def _rows_to_dict(rows: list) -> dict:
@@ -131,18 +158,18 @@ class MappingRepository:
         """
         mapping = {}
         for row in rows:
-            if len(row) < 4:
+            if len(row) < 5:
                 continue
-            sql_type, raw_type, logical_type, final_type = row[:4]
+            sql_type, raw_type, logical_type, final_type, _db_id = row[:5]
             if sql_type is None:
                 continue
             key = str(sql_type).lower().strip()
             if key not in mapping:
                 mapping[key] = {
-                    "raw":          raw_type,
-                    "logical":      logical_type,
-                    "final":        final_type,   # standard type
-                    "dest_final":   None,          # ไม่มี dest context
+                    "raw":        raw_type,
+                    "logical":    logical_type,
+                    "final":      final_type,  # standard type
+                    "dest_final": None,         # ไม่มี dest context
                 }
         return mapping
 
@@ -177,4 +204,4 @@ class MappingRepository:
                     "has_precision": has_precision,
                     "has_scale": has_scale,
                 }
-        return mapping 
+        return mapping

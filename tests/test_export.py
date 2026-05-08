@@ -34,10 +34,12 @@ class TestExcelExport(unittest.TestCase):
         self.assertEqual(wb.sheetnames, ['Data Dictionary', 'Type Comparison', 'Summary'])
 
         comparison = wb['Type Comparison']
-        self.assertEqual(comparison['A6'].value, 'Table')
-        self.assertEqual(comparison['B6'].value, 'Column')
-        self.assertEqual(comparison['K7'].value, 'postgresql')
-        self.assertEqual(comparison['L7'].value, 'sqlserver')
+        self.assertEqual(comparison['A2'].value, 'Source DB')
+        self.assertEqual(comparison['B2'].value, 'postgresql')
+        self.assertEqual(comparison['A3'].value, 'Destination DB')
+        self.assertEqual(comparison['B3'].value, 'sqlserver')
+        self.assertEqual(comparison['A5'].value, 'Table')
+        self.assertEqual(comparison['B5'].value, 'Column')
 
         summary = wb['Summary']
         self.assertEqual(summary['A3'].value, 'Source DB')

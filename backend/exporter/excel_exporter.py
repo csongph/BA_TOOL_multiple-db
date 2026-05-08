@@ -30,17 +30,20 @@ _C = {
     "dup_bg": "FFC7CE",   # duplicate table highlight
 }
 
-# Single-table layout: Raw (cols 1-8) | Gap (cols 9-10) | AVRO (cols 11-19)
+# Single-table layout: Raw (cols 1-8) | Gap (cols 9-10) | AVRO (cols 11-18) | Gap (cols 19-21) | FINAL (cols 22-28)
 _RAW_END = 8
 _AVRO_START = 11
-_AVRO_END = 19
+_AVRO_END = 18
+_FINAL_START = 22
+_FINAL_END = 28
 
 # Multi-table horizontal layout constants
 _RAW_COLS = 8    # columns per Raw section
-_AVRO_COLS = 9    # columns per AVRO section (9 cols now)
+_AVRO_COLS = 8    # columns per AVRO section (8 cols)
+_FINAL_COLS = 7   # columns per FINAL section (7 cols)
 _INNER_GAP = 2    # gap between Raw and AVRO within same table
 _TABLE_GAP = 2    # gap between different tables
-_BLOCK = _RAW_COLS + _INNER_GAP + _AVRO_COLS + _TABLE_GAP  # = 21 cols per table
+_BLOCK = _RAW_COLS + _INNER_GAP + _AVRO_COLS + _TABLE_GAP  # = 20 cols per table
 
 
 def _s(ws, row, col, value, bg=None, fg="000000", bold=False,
@@ -134,10 +137,21 @@ def _write_warning_section(ws, anomalies: list, start_row: int,
     return start_row
 
 
+_DB_LABEL = {
+    "sqlserver":  "SQL Server",
+    "mssql":      "SQL Server",
+    "postgres":   "PostgreSQL",
+    "postgresql": "PostgreSQL",
+    "oracle":     "Oracle",
+    "mysql":      "MySQL",
+}
+
+
 def _write_raw_section(ws, table_name: str, columns: list,
-                       start_row: int, start_col: int = 1, is_dup: bool = False) -> int:
+                       start_row: int, start_col: int = 1, is_dup: bool = False,
+                       source_db: str | None = None) -> int:
     """
-    Section 1 — Raw (SQL Server) เขียนที่ cols start_col .. start_col+7
+    Section 1 — Raw เขียนที่ cols start_col .. start_col+7
     NO. | Name | PK or Unique | Max Length | Format | Nullable | Description | Possible Value
     """
     c1, c2 = start_col, start_col + 7
@@ -147,8 +161,9 @@ def _write_raw_section(ws, table_name: str, columns: list,
        bg=_C["dup_bg"] if is_dup else _C["topic_bg"], bold=True, align_h="left")
     start_row += 1
 
+    db_label = _DB_LABEL.get((source_db or "").lower().strip(), source_db or "SQL Server")
     _merge(ws, start_row, c1, c2)
-    _s(ws, start_row, c1, "New [SQL Server]",
+    _s(ws, start_row, c1, f"New [{db_label}]",
        bg=_C["raw_bg"], bold=True, align_h="left")
     start_row += 1
 
@@ -192,10 +207,10 @@ def _write_raw_section(ws, table_name: str, columns: list,
 def _write_avro_section(ws, table_name: str, columns: list,
                         start_row: int, start_col: int = _AVRO_START, is_dup: bool = False) -> int:
     """
-    Section 2 — Confluent (AVRO) เขียนที่ cols start_col .. start_col+8 (9 cols)
-    NO. | Name | Position | Kafka Type | Format | Intype format | Inject move/if | Description | Possible Value
+    Section 2 — Confluent (AVRO) เขียนที่ cols start_col .. start_col+7 (8 cols)
+    NO. | Name | Partition Key | Raw Format type | Logical Format type | direct move / logic | Description | Possible Value
     """
-    c1, c2 = start_col, start_col + 8   # 9 columns now
+    c1, c2 = start_col, start_col + 7   # 8 columns
 
     _merge(ws, start_row, c1, c2)
     _s(ws, start_row, c1,
@@ -220,9 +235,6 @@ def _write_avro_section(ws, table_name: str, columns: list,
     ):
         _s(ws, start_row, c1 + ci - 1, h,
            bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
-    # 9th col header (blank, padding to maintain width)
-    _s(ws, start_row, c1 + 8, "",
-       bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
     start_row += 1
 
     for i, col in enumerate(columns, 1):
@@ -238,32 +250,76 @@ def _write_avro_section(ws, table_name: str, columns: list,
         _s(ws, r, c1+5, "Direct move",                  bg=bg)
         _s(ws, r, c1+6, "",                             bg=bg, align_h="left", wrap=True)
         _s(ws, r, c1+7, "",                             bg=bg, align_h="left", wrap=True)
-        _s(ws, r, c1+8, "",                             bg=bg, align_h="left", wrap=True)
         start_row += 1
 
     return start_row
 
 
-def _set_col_widths(ws, col_offsets: list | None = None):
-    if col_offsets is None:
-        col_offsets = [1]
+def _write_final_section(ws, table_name: str, columns: list,
+                         start_row: int, start_col: int = _FINAL_START,
+                         dest_db: str | None = None, is_dup: bool = False) -> int:
+    """
+    Section 3 — FINAL (destination DB) เขียนที่ cols start_col .. start_col+6 (7 cols)
+    NO. | Name | Partition Key | Standard Format Type | Final Format Type | Description | Possible Value
+    """
+    c1, c2 = start_col, start_col + 6   # 7 columns
 
-    raw_widths  = [8, 22, 14, 12, 16, 12, 40, 40]
-    avro_widths = [8, 22, 12, 16, 18, 18, 18, 40, 40]  # 9 cols
-    gap_w = 4
+    dest_label = _DB_LABEL.get((dest_db or "").lower().strip(), dest_db or "")
+    final_header = f"Content [FINAL]" + (f" [{dest_label}]" if dest_label else "")
 
-    for base in col_offsets:
-        for i, w in enumerate(raw_widths):
-            ws.column_dimensions[get_column_letter(base + i)].width = w
-        # Inner gap (base+8, base+9)
-        ws.column_dimensions[get_column_letter(base + 8)].width = gap_w
-        ws.column_dimensions[get_column_letter(base + 9)].width = gap_w
-        # AVRO cols (base+10 .. base+18) — 9 cols
-        for i, w in enumerate(avro_widths):
-            ws.column_dimensions[get_column_letter(base + 10 + i)].width = w
-        # Outer gap between tables (base+19, base+20)
-        ws.column_dimensions[get_column_letter(base + 19)].width = gap_w
-        ws.column_dimensions[get_column_letter(base + 20)].width = gap_w
+    _merge(ws, start_row, c1, c2)
+    _s(ws, start_row, c1,
+       f"Topic:    {table_name}" + (" [DUPLICATED]" if is_dup else ""),
+       bg=_C["dup_bg"] if is_dup else _C["topic_bg"], bold=True, align_h="left")
+    start_row += 1
+
+    _merge(ws, start_row, c1, c2)
+    _s(ws, start_row, c1, final_header,
+       bg=_C["avro_bg"], bold=True, align_h="left")
+    start_row += 1
+
+    _merge(ws, start_row, c1, c2)
+    _s(ws, start_row, c1, "Detail Section",
+       bg=_C["detail_bg"], bold=True, align_h="left")
+    start_row += 1
+
+    for ci, h in enumerate(
+        ["NO.", "Name", "Partition Key",
+         "Standard Format Type", "Fianl Format Type",
+         "Description", "Possible Value"], 1
+    ):
+        _s(ws, start_row, c1 + ci - 1, h,
+           bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
+    start_row += 1
+
+    for i, col in enumerate(columns, 1):
+        r = start_row
+        bg = _C["row_odd"] if i % 2 == 1 else _C["row_even"]
+        is_pk = "Y" if col.get("is_pk") else "N"
+
+        _s(ws, r, c1+0, i,                                  bg=bg)
+        _s(ws, r, c1+1, col.get("column_name", ""),         bg=bg, align_h="left")
+        _s(ws, r, c1+2, is_pk,                              bg=_C["pk_bg"] if is_pk == "Y" else bg)
+        _s(ws, r, c1+3, col.get("standard_type", ""),       bg=bg)
+        _s(ws, r, c1+4, col.get("final_type", ""),          bg=bg)
+        _s(ws, r, c1+5, "",                                 bg=bg, align_h="left", wrap=True)
+        _s(ws, r, c1+6, "",                                 bg=bg, align_h="left", wrap=True)
+        start_row += 1
+
+    return start_row
+
+
+def _unique_sheet_title(wb, base: str) -> str:
+    """Return a sheet title unique within wb, truncated to 31 chars."""
+    base = base[:31]
+    existing = {ws.title for ws in wb.worksheets}
+    if base not in existing:
+        return base
+    for n in range(2, 1000):
+        candidate = f"{base[:28]}_{n}"
+        if candidate not in existing:
+            return candidate
+    return base  # fallback (should never reach here)
 
 
 def _set_comparison_widths(ws):
@@ -280,12 +336,17 @@ def _set_summary_widths(ws):
 
 def _build_type_comparison_sheet(ws, tables: dict,
                                  source_db: str | None = None,
-                                 dest_db: str | None = None):
+                                 dest_db: str | None = None,
+                                 file_name: str | None = None):
     row = 1
     _merge(ws, row, 1, 12)
     _s(ws, row, 1, "Type Comparison", bg=_C["topic_bg"], bold=True, align_h="left")
-    row += 2
+    row += 1
 
+    if file_name:
+        _s(ws, row, 1, "File", bold=True, align_h="left")
+        _s(ws, row, 2, file_name)
+        row += 1
     if source_db or dest_db:
         _s(ws, row, 1, "Source DB", bold=True, align_h="left")
         _s(ws, row, 2, source_db or "")
@@ -297,7 +358,7 @@ def _build_type_comparison_sheet(ws, tables: dict,
     headers = [
         "Table", "Column", "Source SQL Type", "Raw Type",
         "Logical Type", "Standard Type", "Final Type",
-        "Nullable", "PK", "File", "Source DB", "Dest DB"
+        "Nullable", "PK", "Length", "Precision", "Scale"
     ]
     for ci, h in enumerate(headers, 1):
         _s(ws, row, ci, h, bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
@@ -305,18 +366,29 @@ def _build_type_comparison_sheet(ws, tables: dict,
 
     for table_name, columns in tables.items():
         for col in columns:
-            _s(ws, row, 1, table_name, align_h="left")
-            _s(ws, row, 2, col.get("column_name", ""), align_h="left")
-            _s(ws, row, 3, col.get("source_sql_type", ""))
-            _s(ws, row, 4, col.get("raw_type", ""))
-            _s(ws, row, 5, col.get("logical_type", ""))
-            _s(ws, row, 6, col.get("standard_type", ""))
-            _s(ws, row, 7, col.get("final_type", ""))
-            _s(ws, row, 8, col.get("nullable", ""))
-            _s(ws, row, 9, "Y" if col.get("is_pk") else "N")
-            _s(ws, row, 10, col.get("file", ""), align_h="left")
-            _s(ws, row, 11, source_db or "")
-            _s(ws, row, 12, dest_db or "")
+            sql_type = col.get("source_sql_type", "")
+            m = re.search(r"\(([^)]+)\)", sql_type)
+            length = precision = scale = None
+            if m:
+                parts = m.group(1).split(",")
+                if len(parts) == 2:
+                    precision = parts[0].strip()
+                    scale = parts[1].strip()
+                else:
+                    length = parts[0].strip()
+
+            _s(ws, row, 1,  table_name,                          align_h="left")
+            _s(ws, row, 2,  col.get("column_name", ""),          align_h="left")
+            _s(ws, row, 3,  sql_type)
+            _s(ws, row, 4,  col.get("raw_type", ""))
+            _s(ws, row, 5,  col.get("logical_type", ""))
+            _s(ws, row, 6,  col.get("standard_type", ""))
+            _s(ws, row, 7,  col.get("final_type", ""))
+            _s(ws, row, 8,  col.get("nullable", ""))
+            _s(ws, row, 9,  "Y" if col.get("is_pk") else "N")
+            _s(ws, row, 10, length)
+            _s(ws, row, 11, precision)
+            _s(ws, row, 12, scale)
             row += 1
 
     _set_comparison_widths(ws)
@@ -325,23 +397,25 @@ def _build_type_comparison_sheet(ws, tables: dict,
 def _build_summary_sheet(ws, tables: dict,
                          source_db: str | None = None,
                          dest_db: str | None = None,
-                         byte_anomalies: dict | None = None):
+                         byte_anomalies: dict | None = None,
+                         file_name: str | None = None):
     row = 1
     _merge(ws, row, 1, 2)
     _s(ws, row, 1, "Export Summary", bg=_C["topic_bg"], bold=True, align_h="left")
-    row += 2
+    row += 1
 
     total_columns = sum(len(cols) for cols in tables.values())
     duplicate_tables = [name for name in tables if "__" in name]
     anomaly_count = sum(len(v) for v in (byte_anomalies or {}).values())
 
     summary_rows = [
-        ("Source DB", source_db or ""),
-        ("Destination DB", dest_db or ""),
-        ("Exported Tables", len(tables)),
-        ("Exported Columns", total_columns),
+        ("File",                file_name or ""),
+        ("Source DB",           source_db or ""),
+        ("Destination DB",      dest_db or ""),
+        ("Exported Tables",     len(tables)),
+        ("Exported Columns",    total_columns),
         ("Duplicate table keys", ", ".join(duplicate_tables) if duplicate_tables else "None"),
-        ("Byte Anomalies", anomaly_count),
+        ("Byte Anomalies",      anomaly_count),
     ]
 
     for key, value in summary_rows:
@@ -352,22 +426,51 @@ def _build_summary_sheet(ws, tables: dict,
     _set_summary_widths(ws)
 
 
-def _build_sheet(ws, table_name: str, columns: list, anomalies: list | None = None):
-    """Single-table sheet: Raw (cols 1-8) และ AVRO (cols 11-18) เขียนพร้อมกันที่ row 1"""
-    end_row = _write_raw_section(ws, table_name, columns, start_row=1, start_col=1)
+def _build_sheet(ws, table_name: str, columns: list, anomalies: list | None = None,
+                 source_db: str | None = None, dest_db: str | None = None):
+    """Single-table sheet: Raw (cols 1-8), AVRO (cols 11-18), FINAL (cols 22-28)"""
+    end_row = _write_raw_section(ws, table_name, columns, start_row=1, start_col=1,
+                                 source_db=source_db)
     _write_avro_section(ws, table_name, columns, start_row=1, start_col=_AVRO_START)
+    _write_final_section(ws, table_name, columns, start_row=1, start_col=_FINAL_START,
+                         dest_db=dest_db)
 
     if anomalies:
         tagged = [{**a, "table": table_name} for a in anomalies if isinstance(a, dict)]
-        _write_warning_section(ws, tagged, start_row=end_row, c2=_AVRO_END)
+        _write_warning_section(ws, tagged, start_row=end_row, c2=_FINAL_END)
 
-    _set_col_widths(ws, col_offsets=[1])
+def _set_col_widths(ws, col_offsets=None):
+    if col_offsets is None:
+        col_offsets = [1]
+
+    raw_widths  = [8, 22, 14, 12, 16, 12, 40, 40]
+    avro_widths = [8, 22, 12, 16, 18, 18, 40, 40]  # 8 cols
+    final_widths = [8, 22, 12, 20, 20, 40, 40]      # 7 cols
+    gap_w = 4
+
+    for base in col_offsets:
+        for i, w in enumerate(raw_widths):
+            ws.column_dimensions[get_column_letter(base + i)].width = w
+        # Inner gap (base+8, base+9)
+        ws.column_dimensions[get_column_letter(base + 8)].width = gap_w
+        ws.column_dimensions[get_column_letter(base + 9)].width = gap_w
+        # AVRO cols (base+10 .. base+17) — 8 cols
+        for i, w in enumerate(avro_widths):
+            ws.column_dimensions[get_column_letter(base + 10 + i)].width = w
+        # gap between AVRO and FINAL (base+18, base+19, base+20)
+        ws.column_dimensions[get_column_letter(base + 18)].width = gap_w
+        ws.column_dimensions[get_column_letter(base + 19)].width = gap_w
+        ws.column_dimensions[get_column_letter(base + 20)].width = gap_w
+        # FINAL cols (base+21 .. base+27) — 7 cols
+        for i, w in enumerate(final_widths):
+            ws.column_dimensions[get_column_letter(base + 21 + i)].width = w
 
 
-def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None):
+def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None,
+                       source_db: str | None = None, dest_db: str | None = None):
     """
     ทุกตารางอยู่ใน sheet เดียว เรียงแนวตั้ง (ลงมาเรื่อยๆ)
-    แต่ละตาราง: Raw (cols 1-8) ซ้าย | gap | AVRO (cols 11-18) ขวา
+    แต่ละตาราง: Raw (cols 1-8) | AVRO (cols 11-18) | FINAL (cols 22-28)
     WARNING รวมกันทั้งหมดไว้ด้านล่างสุด พร้อมชื่อตาราง
     """
     from collections import Counter
@@ -382,10 +485,14 @@ def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None):
     for table_name, columns in tables.items():
         _is_dup = table_name in _dup_tables
         raw_end  = _write_raw_section(ws, table_name, columns,
-                                      start_row=current_row, start_col=1, is_dup=_is_dup)
+                                      start_row=current_row, start_col=1,
+                                      is_dup=_is_dup, source_db=source_db)
         avro_end = _write_avro_section(ws, table_name, columns,
                                        start_row=current_row, start_col=_AVRO_START, is_dup=_is_dup)
-        current_row = max(raw_end, avro_end) + 2   # 2-row gap ระหว่างตาราง
+        final_end = _write_final_section(ws, table_name, columns,
+                                         start_row=current_row, start_col=_FINAL_START,
+                                         dest_db=dest_db, is_dup=_is_dup)
+        current_row = max(raw_end, avro_end, final_end) + 2   # 2-row gap ระหว่างตาราง
 
         for a in (byte_anomalies or {}).get(table_name) or []:
             if isinstance(a, dict):
@@ -393,7 +500,7 @@ def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None):
 
     if all_anomalies:
         _write_warning_section(ws, all_anomalies,
-                               start_row=current_row - 1, c2=_AVRO_END)
+                               start_row=current_row - 1, c2=_FINAL_END)
 
     _set_col_widths(ws, col_offsets=[1])
 
@@ -403,22 +510,25 @@ def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None):
 def export_confluent_xlsx(tables: dict,
                            byte_anomalies: dict | None = None,
                            source_db: str | None = None,
-                           dest_db: str | None = None) -> io.BytesIO:
+                           dest_db: str | None = None,
+                           file_name: str | None = None) -> io.BytesIO:
     """ทุกตารางใน workbook เดียว: Data Dictionary + Type Comparison + Summary"""
     wb = Workbook()
 
     ws = wb.active
     ws.title = "Data Dictionary"
-    _build_multi_sheet(ws, tables, byte_anomalies)
+    _build_multi_sheet(ws, tables, byte_anomalies, source_db=source_db, dest_db=dest_db)
 
-    comparison_ws = wb.create_sheet(title="Type Comparison")
+    comparison_ws = wb.create_sheet(title=_unique_sheet_title(wb, "Type Comparison"))
     _build_type_comparison_sheet(comparison_ws, tables,
-                                 source_db=source_db, dest_db=dest_db)
+                                 source_db=source_db, dest_db=dest_db,
+                                 file_name=file_name)
 
-    summary_ws = wb.create_sheet(title="Summary")
+    summary_ws = wb.create_sheet(title=_unique_sheet_title(wb, "Summary"))
     _build_summary_sheet(summary_ws, tables,
                          source_db=source_db, dest_db=dest_db,
-                         byte_anomalies=byte_anomalies)
+                         byte_anomalies=byte_anomalies,
+                         file_name=file_name)
 
     output = io.BytesIO()
     wb.save(output)
@@ -429,20 +539,23 @@ def export_confluent_xlsx(tables: dict,
 def export_table_xlsx(columns: list, table_name: str = "Sheet1",
                       anomalies: list | None = None,
                       source_db: str | None = None,
-                      dest_db: str | None = None) -> io.BytesIO:
+                      dest_db: str | None = None,
+                      file_name: str | None = None) -> io.BytesIO:
     wb = Workbook()
     ws = wb.active
-    ws.title = table_name[:31]
-    _build_sheet(ws, table_name, columns, anomalies=anomalies)
+    ws.title = _unique_sheet_title(wb, table_name)
+    _build_sheet(ws, table_name, columns, anomalies=anomalies, source_db=source_db, dest_db=dest_db)
 
-    comparison_ws = wb.create_sheet(title="Type Comparison")
+    comparison_ws = wb.create_sheet(title=_unique_sheet_title(wb, "Type Comparison"))
     _build_type_comparison_sheet(comparison_ws, {table_name: columns},
-                                 source_db=source_db, dest_db=dest_db)
+                                 source_db=source_db, dest_db=dest_db,
+                                 file_name=file_name)
 
-    summary_ws = wb.create_sheet(title="Summary")
+    summary_ws = wb.create_sheet(title=_unique_sheet_title(wb, "Summary"))
     _build_summary_sheet(summary_ws, {table_name: columns},
                          source_db=source_db, dest_db=dest_db,
-                         byte_anomalies={table_name: anomalies} if anomalies else {})
+                         byte_anomalies={table_name: anomalies} if anomalies else {},
+                         file_name=file_name)
 
     output = io.BytesIO()
     wb.save(output)

@@ -1,38 +1,34 @@
--- PostgreSQL Schema for HR Employee and Payroll
--- Character Set: UTF8 (supports Thai characters)
-
 CREATE TABLE hrEmployee (
-    EmployeeID   VARCHAR(36)   COLLATE "C" NOT NULL,
+    EmployeeID   VARCHAR(36)   NOT NULL,
     FirstName    VARCHAR(100)  NOT NULL,
     LastName     VARCHAR(100)  NOT NULL,
     Email        VARCHAR(150)  NULL,
     Department   VARCHAR(100)  NULL,
     Position     VARCHAR(100)  NULL,
     HireDate     DATE          NULL,
-    IsActive     SMALLINT      NOT NULL DEFAULT 1,
+    IsActive     BOOLEAN      NOT NULL DEFAULT TRUE,
+    CreatedAt    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
 
-    PRIMARY KEY (EmployeeID)
+    PRIMARY KEY (EmployeeID),
+    CONSTRAINT uq_employee_email UNIQUE (Email)
 );
-
--- Create index for foreign key reference
-CREATE INDEX idx_employee_id ON hrEmployee(EmployeeID);
-
 CREATE TABLE hrPayroll_Details (
     PayrollID              UUID              NOT NULL DEFAULT gen_random_uuid(),
-    EmployeeID             VARCHAR(36)       COLLATE "C" NOT NULL,
-    BaseSalary             NUMERIC(19, 2)    NULL,
-    TaxRate                NUMERIC(5, 2)     NULL,
-    SocialSecurityFund     NUMERIC(18, 4)    NULL,
-    OT_Rate                FLOAT8            NULL,
+    EmployeeID             VARCHAR(36)       NOT NULL,
+    BaseSalary             NUMERIC(19, 2)    NOT NULL DEFAULT 0.00,
+    TaxRate                NUMERIC(5, 2)     NOT NULL DEFAULT 0.00,
+    SocialSecurityFund     NUMERIC(18, 4)    NOT NULL DEFAULT 0.00,
+    OT_Rate                NUMERIC(10, 2)    NOT NULL DEFAULT 0.00,
     PaymentMethod          INTEGER           NOT NULL,
-    IsTaxExempt            SMALLINT          DEFAULT 0,
-    LastPaymentTimestamp   TIMESTAMP WITH TIME ZONE NULL DEFAULT CURRENT_TIMESTAMP,
+    IsTaxExempt BOOLEAN NOT NULL DEFAULT FALSE,
+    LastPaymentTimestamp   TIMESTAMPTZ       NULL     DEFAULT NOW(),
     PayrollNote            TEXT              NULL,
 
     PRIMARY KEY (PayrollID),
-    FOREIGN KEY (EmployeeID) REFERENCES hrEmployee(EmployeeID) ON DELETE CASCADE ON UPDATE CASCADE
+    CONSTRAINT uq_payroll_employee UNIQUE (EmployeeID),
+    CONSTRAINT fk_payroll_employee
+        FOREIGN KEY (EmployeeID) REFERENCES hrEmployee(EmployeeID)
+        ON DELETE CASCADE
 );
-
--- Create indexes for better query performance
-CREATE INDEX idx_payroll_employee ON hrPayroll_Details(EmployeeID);
+CREATE INDEX idx_payroll_employee  ON hrPayroll_Details(EmployeeID);
 CREATE INDEX idx_payroll_timestamp ON hrPayroll_Details(LastPaymentTimestamp);

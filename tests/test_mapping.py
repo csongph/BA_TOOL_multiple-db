@@ -50,6 +50,31 @@ class TestDataTypeConverter(unittest.TestCase):
         self.assertIsNone(result['final'])
         self.assertIn("Type 'decimal' not found", result['reason'])
 
+    def test_bytes_decimal_and_binary_are_not_byte_anomalies(self):
+        mapping = {
+            'decimal': {'raw': 'bytes', 'logical': 'decimal', 'final': 'DECIMAL', 'dest_final': None},
+            'varbinary': {'raw': 'bytes', 'logical': 'bytes', 'final': 'VARBINARY', 'dest_final': None},
+        }
+        conv = DataTypeConverter(mapping)
+
+        decimal_result = conv.convert('decimal(10,2)')
+        binary_result = conv.convert('varbinary(20)')
+
+        self.assertFalse(decimal_result['byte_anomaly'])
+        self.assertIsNone(decimal_result['byte_anomaly_detail'])
+        self.assertFalse(binary_result['byte_anomaly'])
+        self.assertIsNone(binary_result['byte_anomaly_detail'])
+
+    def test_bytes_with_unexpected_logical_type_is_byte_anomaly(self):
+        mapping = {
+            'weird': {'raw': 'bytes', 'logical': 'string', 'final': 'VARCHAR', 'dest_final': None},
+        }
+        conv = DataTypeConverter(mapping)
+        result = conv.convert('weird')
+
+        self.assertTrue(result['byte_anomaly'])
+        self.assertIn("string", result['byte_anomaly_detail'])
+
 
 class TestMappingRepositoryHelpers(unittest.TestCase):
     def test_rows_to_dict_pair_keeps_dest_final_if_present(self):

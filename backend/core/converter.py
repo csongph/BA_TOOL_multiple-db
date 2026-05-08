@@ -73,15 +73,26 @@ class DataTypeConverter:
 
         override_mapping: ถ้าส่งมา จะใช้แทน self.mapping
                           ใช้สำหรับ per-db-pair mapping
+
+        [FIX] ลำดับการหา mapping key:
+          1. exact key  — "tinyint(1)" ตรงตัว (กรณี DB เก็บ source_type พร้อม precision)
+          2. base key   — "tinyint"    หลังตัด (...) และ whitespace ออก
+        ป้องกัน miss เมื่อ DB มี row source_type='tinyint(1)' แต่ normalize() คืน 'tinyint'
         """
         mapping = override_mapping if override_mapping is not None else self.mapping
         base = self.normalize(sql_type)
-        data = mapping.get(base)
+
+        # [FIX] ลอง exact key ก่อน แล้วค่อย fallback ไป base
+        exact_key = sql_type.lower().strip().rstrip(",")
+        data = mapping.get(exact_key) or mapping.get(base)
 
         if not data:
             return {
                 "input": sql_type, "raw": None, "logical": None, "final": None,
-                "status": "unknown", "reason": f"Type '{base}' not found in mapping"
+                "standard_type": None,
+                "status": "unknown", "reason": f"Type '{base}' not found in mapping",
+                "byte_anomaly": False,
+                "byte_anomaly_detail": None,
             }
 
         final_base = data.get("dest_final") or data.get("final")

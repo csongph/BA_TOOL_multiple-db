@@ -1,45 +1,51 @@
--- Oracle Schema for HR Employee and Payroll
--- Character Set: AL32UTF8 (supports Thai characters)
-
--- Drop tables if they exist (optional)
--- DROP TABLE hrPayroll_Details;
--- DROP TABLE hrEmployee;
-
 CREATE TABLE hrEmployee (
     EmployeeID   VARCHAR2(36)   NOT NULL,
-    FirstName    NVARCHAR2(100) NOT NULL,
-    LastName     NVARCHAR2(100) NOT NULL,
-    Email        NVARCHAR2(150) NULL,
-    Department   NVARCHAR2(100) NULL,
-    Position     NVARCHAR2(100) NULL,
+    FirstName    VARCHAR2(100)  NOT NULL,
+    LastName     VARCHAR2(100)  NOT NULL,
+    Email        VARCHAR2(150)  NULL,
+    Department   VARCHAR2(100)  NULL,
+    Position     VARCHAR2(100)  NULL,
     HireDate     DATE           NULL,
     IsActive     NUMBER(1)      NOT NULL DEFAULT 1,
 
-    CONSTRAINT pk_employee PRIMARY KEY (EmployeeID)
+    CreatedAt    TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT SYSTIMESTAMP,
+
+    CONSTRAINT pk_employee PRIMARY KEY (EmployeeID),
+    CONSTRAINT uq_employee_email UNIQUE (Email)
 );
 
--- Create index for employee ID
 CREATE INDEX idx_employee_id ON hrEmployee(EmployeeID);
-
 CREATE TABLE hrPayroll_Details (
-    PayrollID              VARCHAR2(36)          NOT NULL DEFAULT SYS_GUID(),
+    PayrollID              VARCHAR2(36)          NOT NULL,
     EmployeeID             VARCHAR2(36)          NOT NULL,
-    BaseSalary             NUMBER(19, 2)         NULL,
-    TaxRate                NUMBER(5, 2)          NULL,
-    SocialSecurityFund     NUMBER(18, 4)         NULL,
-    OT_Rate                BINARY_FLOAT          NULL,
+    BaseSalary             NUMBER(19, 2)         NOT NULL DEFAULT 0,
+    TaxRate                NUMBER(5, 2)          NOT NULL DEFAULT 0,
+    SocialSecurityFund     NUMBER(18, 4)         NOT NULL DEFAULT 0,
+    OT_Rate                NUMBER(10, 2)         NOT NULL DEFAULT 0,
     PaymentMethod          NUMBER(10)            NOT NULL,
-    IsTaxExempt            NUMBER(1)             DEFAULT 0,
-    LastPaymentTimestamp   TIMESTAMP WITH TIME ZONE NULL DEFAULT SYSTIMESTAMP,
+    IsTaxExempt            NUMBER(1)             NOT NULL DEFAULT 0,
+    LastPaymentTimestamp   TIMESTAMP WITH TIME ZONE  NULL DEFAULT SYSTIMESTAMP,
     PayrollNote            CLOB                  NULL,
 
     CONSTRAINT pk_payroll PRIMARY KEY (PayrollID),
-    CONSTRAINT fk_payroll_employee FOREIGN KEY (EmployeeID) REFERENCES hrEmployee(EmployeeID) ON DELETE CASCADE
+    CONSTRAINT uq_payroll_employee UNIQUE (EmployeeID),
+    CONSTRAINT fk_payroll_employee
+        FOREIGN KEY (EmployeeID) REFERENCES hrEmployee(EmployeeID)
+        ON DELETE CASCADE
+        -- Oracle ไม่รองรับ ON UPDATE CASCADE — ถูกต้องที่ไม่มี
 );
-
--- Create indexes for better query performance
-CREATE INDEX idx_payroll_employee ON hrPayroll_Details(EmployeeID);
+CREATE OR REPLACE TRIGGER trg_payroll_id
+    BEFORE INSERT ON hrPayroll_Details
+    FOR EACH ROW
+BEGIN
+    IF :NEW.PayrollID IS NULL THEN
+        -- แปลง RAW(16) จาก SYS_GUID() เป็น UUID string format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+        :NEW.PayrollID := LOWER(
+            REGEXP_REPLACE(RAWTOHEX(SYS_GUID()),
+                '([A-F0-9]{8})([A-F0-9]{4})([A-F0-9]{4})([A-F0-9]{4})([A-F0-9]{12})',
+                '\1-\2-\3-\4-\5')
+        );
+    END IF;
+END;
+CREATE INDEX idx_payroll_employee  ON hrPayroll_Details(EmployeeID);
 CREATE INDEX idx_payroll_timestamp ON hrPayroll_Details(LastPaymentTimestamp);
-
--- Create sequence for generating IDs (optional alternative)
--- CREATE SEQUENCE seq_payroll_id START WITH 1 INCREMENT BY 1;
